@@ -57,11 +57,11 @@ Deploy path: push to `worker/**` -> `deploy-worker.yml` -> `wrangler deploy` (so
 - **Exit:** `/start` in Telegram launches a workflow run
 
 ### Phase 3: Workflow and runner prep
-- [ ] `concurrency` group (one run at a time), `timeout-minutes: 330`
-- [ ] Free disk first (runner has ~14 GB): remove dotnet, android, ghc
-- [ ] llama.cpp prebuilt release binary (no compile)
-- [ ] Model download + `actions/cache` (repo cache limit is 10 GB)
-- **Exit:** `llama-server` up, answers a curl request
+- [x] `concurrency` group (one run at a time), `timeout-minutes: 330`
+- [x] Free disk first (runner has ~14 GB): remove dotnet, android, ghc
+- [x] llama.cpp prebuilt release binary (no compile) — pinned `b11228`, ubuntu-x64 CPU build
+- [x] Model download + `actions/cache` (repo cache limit is 10 GB) — Qwen2.5-7B Q4_K_M, ~4.7 GB, restore/save split so a partial run doesn't lose the download
+- **Exit:** `llama-server` up, answers a curl request — verified by `smoke_test.sh` (`/v1/chat/completions`, checks token count + measures tok/s)
 
 ### Phase 4: Bot (chat)
 - [ ] Python, long polling, `deleteWebhook` on boot

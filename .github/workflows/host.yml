@@ -10,16 +10,89 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # Pinned: releases/latest is unreliable (tag scheme changed, some tags have no assets).
+  LLAMA_TAG: b11228
+  MODELS_DIR: /home/runner/models
+
 jobs:
   host:
     runs-on: ubuntu-latest
     timeout-minutes: 330
     steps:
-      - name: Placeholder (Phase 3 pending)
+      - uses: actions/checkout@v7
+
+      - name: Free disk space
+        run: bash scripts/setup_runner.sh
+
+      - name: Read model config
+        id: model
+        run: |
+          id=$(jq -er .default config/models.json)
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          echo "file=$(jq -er ".models[\"$id\"].file" config/models.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore model cache
+        id: cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ env.MODELS_DIR }}
+          key: model-${{ steps.model.outputs.file }}-v1
+
+      - name: Fetch model
+        env:
+          MODEL_ID: ${{ steps.model.outputs.id }}
+        run: bash scripts/fetch_models.sh "$MODEL_ID"
+
+      # Save right after download so a later failure does not lose the 4.7 GB fetch.
+      - name: Save model cache
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ env.MODELS_DIR }}
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+      - name: Install llama.cpp (prebuilt, CPU)
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/llama"
+          mkdir -p "$dir"
+          curl -fsSL --retry 5 --retry-delay 5 \
+            "https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_TAG}/llama-${LLAMA_TAG}-bin-ubuntu-x64.tar.gz" \
+            | tar -xz -C "$dir" --strip-components=1
+          echo "LLAMA_DIR=$dir" >> "$GITHUB_ENV"
+          ver=$(LD_LIBRARY_PATH="$dir" "$dir/llama-server" --version 2>&1)
+          sed -n 1p <<<"$ver"
+
+      - name: Generate server API key
+        run: |
+          key=$(openssl rand -hex 24)
+          echo "::add-mask::$key"
+          echo "LLAMA_API_KEY=$key" >> "$GITHUB_ENV"
+
+      - name: Start llama-server
+        env:
+          MODEL_ID: ${{ steps.model.outputs.id }}
+        run: bash scripts/start_llama.sh "$MODEL_ID"
+
+      - name: Smoke test
+        id: smoke
+        run: bash scripts/smoke_test.sh
+
+      # Phase 4 replaces this with: run bot.py (long polling) until /stop or idle timeout.
+      - name: Notify Telegram
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_ALLOWED_CHAT_ID: ${{ secrets.TG_ALLOWED_CHAT_ID }}
+          TPS: ${{ steps.smoke.outputs.tps }}
         run: |
-          curl -fsS -o /dev/null "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
-            --data-urlencode "chat_id=${TG_ALLOWED_CHAT_ID}" \
-            --data-urlencode "text=Dispatch OK. Runner reached. Model hosting not built yet (Phase 3)."
+          bash scripts/tg_notify.sh "llama-server OK (Qwen2.5-7B Q4_K_M, ~${TPS} tok/s). Phase 3 passed. Bot arrives in Phase 4."
+
+      - name: Notify failure
+        if: failure()
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_ALLOWED_CHAT_ID: ${{ secrets.TG_ALLOWED_CHAT_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          bash scripts/tg_notify.sh "Run failed. Details: ${RUN_URL}"

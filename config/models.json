@@ -1,0 +1,12 @@
+{
+  "default": "qwen2.5-7b",
+  "models": {
+    "qwen2.5-7b": {
+      "kind": "chat",
+      "repo": "bartowski/Qwen2.5-7B-Instruct-GGUF",
+      "file": "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+      "min_bytes": 4500000000,
+      "ctx": 4096
+    }
+  }
+}
