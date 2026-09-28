@@ -79,14 +79,59 @@ jobs:
         id: smoke
         run: bash scripts/smoke_test.sh
 
-      # Phase 4 replaces this with: run bot.py (long polling) until /stop or idle timeout.
-      - name: Notify Telegram
+      - name: Notify Telegram (ready)
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_ALLOWED_CHAT_ID: ${{ secrets.TG_ALLOWED_CHAT_ID }}
           TPS: ${{ steps.smoke.outputs.tps }}
         run: |
-          bash scripts/tg_notify.sh "llama-server OK (Qwen2.5-7B Q4_K_M, ~${TPS} tok/s). Phase 3 passed. Bot arrives in Phase 4."
+          bash scripts/tg_notify.sh "llama-server OK (Qwen2.5-7B Q4_K_M, ~${TPS} tok/s). Switching to chat mode - ask me anything. Commands: /stop /reset /model"
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install bot dependencies
+        run: pip install -r bot/requirements.txt
+
+      # Blocks here for the whole chat session: bot.py deletes the webhook
+      # itself (Application.run_polling does this) and long-polls Telegram
+      # directly until /stop is sent in chat, the 330 min timeout hits, or
+      # /stop from the worker cancels the run (only reachable before the
+      # webhook comes down or after it's restored - see restore_webhook.sh).
+      - name: Run bot
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_ALLOWED_CHAT_ID: ${{ secrets.TG_ALLOWED_CHAT_ID }}
+        run: python3 bot/bot.py
+
+      # Runs on success, failure AND cancellation - see the comment in
+      # restore_webhook.sh for why this calls Telegram directly instead of
+      # the worker's /heal endpoint. WORKER_URL is resolved as a plain
+      # assignment (not embedded in the echo below) so a Cloudflare API
+      # hiccup fails this step immediately instead of silently writing an
+      # empty URL forward.
+      - name: Restore webhook
+        if: always()
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_WEBHOOK_SECRET: ${{ secrets.TG_WEBHOOK_SECRET }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          WORKER_URL="$(bash scripts/resolve_worker_url.sh)"
+          echo "WORKER_URL=$WORKER_URL" >> "$GITHUB_ENV"
+          bash scripts/restore_webhook.sh
+
+      # Only fires when every prior required step succeeded, i.e. bot.py
+      # exited cleanly via /stop or (later, Phase 6) idle timeout - not
+      # after a failure, which "Notify failure" below already reports.
+      - name: Notify Telegram (offline)
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_ALLOWED_CHAT_ID: ${{ secrets.TG_ALLOWED_CHAT_ID }}
+        run: bash scripts/tg_notify.sh "Session ended. Runner offline."
 
       - name: Notify failure
         if: failure()

@@ -64,12 +64,12 @@ Deploy path: push to `worker/**` -> `deploy-worker.yml` -> `wrangler deploy` (so
 - **Exit:** `llama-server` up, answers a curl request — verified by `smoke_test.sh` (`/v1/chat/completions`, checks token count + measures tok/s)
 
 ### Phase 4: Bot (chat)
-- [ ] Python, long polling, `deleteWebhook` on boot
-- [ ] Owner-only allowlist
-- [ ] History kept in memory only, never written to disk
-- [ ] Commands: `/stop`, `/model`, `/reset`
-- [ ] Streamed replies via message edit
-- [ ] `if: always()` step restores webhook
+- [x] Python, long polling, `deleteWebhook` on boot — `Application.run_polling()` does this itself
+- [x] Owner-only allowlist — silent drop for any other chat ID, no reply (nothing for a prober to see)
+- [x] History kept in memory only, never written to disk — plain dict, gone when the process exits
+- [x] Commands: `/stop`, `/model`, `/reset` (`/stop` calls `Application.stop_running()`, exits the job cleanly)
+- [x] Streamed replies via message edit — throttled to one edit / 0.8s, final edit always lands
+- [x] `if: always()` step restores webhook — direct `setWebhook`, not the worker's `/heal` (see restore_webhook.sh)
 - **Exit:** ask a question in Telegram, get an answer
 
 ### Phase 5: Image generation
