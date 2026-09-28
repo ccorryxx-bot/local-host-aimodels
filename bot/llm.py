@@ -25,18 +25,29 @@ async def stream_chat(
     messages: list[dict[str, str]],
     max_tokens: int = 800,
     temperature: float = 0.7,
+    sampling: dict[str, float | int] | None = None,
 ) -> AsyncIterator[str]:
     """Yield text deltas from a streaming chat completion.
+
+    `sampling` carries per-model overrides from config/models.json (e.g. Gemma 4
+    wants temperature 1.0 / top_p 0.95 / top_k 64). Callers pass an already
+    whitelisted dict; it is applied last so it wins over `temperature`.
 
     Raises LlamaError on a non-2xx response or a response stream that never
     produces a single valid delta (e.g. server crashed mid-stream).
     """
-    payload = {
+    payload: dict = {
         "messages": messages,
         "max_tokens": max_tokens,
         "temperature": temperature,
         "stream": True,
+        # Thinking models (Gemma 4) otherwise spend the token budget on hidden
+        # reasoning and the visible `content` can come back empty. Templates
+        # that have no such switch (Qwen2.5) simply ignore the variable.
+        "chat_template_kwargs": {"enable_thinking": False},
     }
+    if sampling:
+        payload.update(sampling)
     headers = {"Authorization": f"Bearer {api_key}"}
 
     got_any_delta = False

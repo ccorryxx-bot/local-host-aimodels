@@ -70,6 +70,8 @@ Deploy path: push to `worker/**` -> `deploy-worker.yml` -> `wrangler deploy` (so
 - [x] Commands: `/stop`, `/model`, `/reset` (`/stop` calls `Application.stop_running()`, exits the job cleanly)
 - [x] Streamed replies via message edit — throttled to one edit / 0.8s, final edit always lands
 - [x] `if: always()` step restores webhook — direct `setWebhook`, not the worker's `/heal` (see restore_webhook.sh)
+- [x] Model select: `/start <id>` (worker -> `workflow_dispatch` input `model`); registry in `config/models.json`; `/model` lists ids; switching = `/stop`, then `/start <id>`
+- [x] Long replies roll over into extra messages (no more `[truncated]`); history capped by chars as well as turns
 - **Exit:** ask a question in Telegram, get an answer
 
 ### Phase 5: Image generation
@@ -101,7 +103,9 @@ Deploy path: push to `worker/**` -> `deploy-worker.yml` -> `wrangler deploy` (so
 | Decision | Choice | Why |
 |---|---|---|
 | Inference | `llama-server` | Lighter than Ollama in CI, prebuilt binaries |
-| Chat model | Qwen2.5-7B-Instruct Q4_K_M | Switchable to Coder 7B via `/model` |
+| Chat model | Qwen2.5-7B-Instruct Q4_K_M (default) | Fast fallback, weak Burmese |
+| Coding + multilingual | Gemma 4 12B QAT (`gemma4-12b`) | LiveCodeBench v6 72%, Apache 2.0, 6.7 GB. **Burmese quality unverified: test first**, then consider making it the default |
+| Burmese-first | AI4Burmese Padauk Q8 (`padauk`) | Gemma 4 fine-tune, community model, 8 GB, unproven |
 | Bot language | Python | Fast to build, mature Telegram libraries |
 | Webhook handling | Swap + Worker self-heal | Simplest for v1 |
 
@@ -110,6 +114,9 @@ Deploy path: push to `worker/**` -> `deploy-worker.yml` -> `wrangler deploy` (so
 - Worker as a message relay (KV queue) so the runner never touches the webhook. More robust, more code.
 
 ## Known limits
+
+- Repo cache limit is 10 GB, so the three models (about 19 GB) cannot all stay cached; least-recently-used ones get evicted and re-download (+3-6 min).
+- `gemma4-12b` / `padauk` speeds are estimates until benchmarked (Phase 7). `padauk` and Gemma 4 GGUF loading via `-m` (text only, no mmproj) is untested on the runner.
 
 - CPU-only runner: roughly 3-6 tokens/sec on a 7B Q4 model.
 - 16 GB RAM, ~14 GB disk: models must fit together (chat about 5 GB, image about 2-4 GB).

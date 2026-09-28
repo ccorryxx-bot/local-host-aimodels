@@ -9,7 +9,7 @@ PORT="${LLAMA_PORT:-8080}"
 resp=$(curl -fsS --max-time 300 "http://127.0.0.1:$PORT/v1/chat/completions" \
   -H "Authorization: Bearer $LLAMA_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","content":"Count from 1 to 30, separated by spaces."}],"max_tokens":64,"temperature":0}')
+  -d '{"messages":[{"role":"user","content":"Count from 1 to 30, separated by spaces."}],"max_tokens":64,"temperature":0,"chat_template_kwargs":{"enable_thinking":false}}')
 
 tokens=$(jq -er '.usage.completion_tokens' <<<"$resp")
 text=$(jq -er '.choices[0].message.content' <<<"$resp")

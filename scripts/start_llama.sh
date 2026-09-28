@@ -27,7 +27,7 @@ export LD_LIBRARY_PATH="$LLAMA_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 nohup "$LLAMA_DIR/llama-server" \
   -m "$model" \
   --host 127.0.0.1 --port "$PORT" \
-  -c "$ctx" -t "$(nproc)" -np 1 \
+  -c "$ctx" -t "$(nproc)" -np 1 --jinja \
   --api-key-file "$TMP/llama.key" \
   --no-webui --no-slots \
   >"$LOG" 2>&1 &

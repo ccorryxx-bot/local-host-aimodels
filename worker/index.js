@@ -62,17 +62,28 @@ async function heal(env) {
   return { healed: !!res.ok, reason: res.ok ? 'webhook set' : res.description };
 }
 
+// Model ids are keys of config/models.json. The worker doesn't have that file,
+// so it only checks the *shape* here; the workflow verifies the id really exists
+// (and tells the owner the valid ones if not).
+const MODEL_ID_RE = /^[a-z0-9][a-z0-9._-]{0,39}$/;
+
 async function handleCommand(env, chatId, text) {
-  const cmd = text.trim().split(/\s+/)[0].split('@')[0].toLowerCase();
+  const [head, arg] = text.trim().split(/\s+/);
+  const cmd = head.split('@')[0].toLowerCase();
   try {
     if (cmd === '/start') {
+      const model = (arg || '').toLowerCase();
+      if (model && !MODEL_ID_RE.test(model)) return say(env, chatId, 'Invalid model id. Usage: /start [model]');
       if (await activeRun(env)) return say(env, chatId, 'Already running.');
+      const body = { ref: env.GH_REF };
+      if (model) body.inputs = { model };
       const res = await gh(env, `/actions/workflows/${env.GH_WORKFLOW}/dispatches`, {
         method: 'POST',
-        body: JSON.stringify({ ref: env.GH_REF }),
+        body: JSON.stringify(body),
       });
       if (res.status !== 204) return say(env, chatId, `Dispatch failed: GitHub ${res.status}.`);
-      return say(env, chatId, 'Starting. ETA 3-5 min.');
+      const which = model ? ` (${model})` : '';
+      return say(env, chatId, `Starting${which}. ETA 3-5 min; a model's first run also downloads it (+3-6 min).`);
     }
     if (cmd === '/status') {
       const run = await activeRun(env);
@@ -85,7 +96,7 @@ async function handleCommand(env, chatId, text) {
       const res = await gh(env, `/actions/runs/${run.id}/cancel`, { method: 'POST' });
       return say(env, chatId, res.status === 202 ? 'Stopping.' : `Cancel failed: GitHub ${res.status}.`);
     }
-    return say(env, chatId, 'Commands: /start /stop /status');
+    return say(env, chatId, 'Commands: /start [model] /stop /status');
   } catch (e) {
     return say(env, chatId, `Error: ${e.message}`);
   }

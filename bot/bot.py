@@ -37,6 +37,7 @@ from telegram.ext import (
     filters,
 )
 
+from chunking import split_point
 from idle import IdleAction, IdleTracker
 from llm import LlamaError, stream_chat
 
@@ -62,7 +63,6 @@ LLAMA_API_KEY = os.environ["LLAMA_API_KEY"]
 LLAMA_PORT = os.environ.get("LLAMA_PORT", "8080")
 LLAMA_URL = f"http://127.0.0.1:{LLAMA_PORT}"
 
-MAX_TOKENS = int(os.environ.get("LLAMA_MAX_TOKENS", "800"))
 # Kept user+assistant pairs, not raw message count.
 MAX_HISTORY_TURNS = int(os.environ.get("MAX_HISTORY_TURNS", "12"))
 EDIT_INTERVAL = float(os.environ.get("EDIT_INTERVAL_SECONDS", "0.8"))
@@ -70,6 +70,32 @@ SYSTEM_PROMPT = os.environ.get(
     "SYSTEM_PROMPT", "You are a helpful, concise assistant reachable over Telegram."
 )
 MODELS_CONFIG = Path(__file__).resolve().parent.parent / "config" / "models.json"
+
+
+def _load_registry() -> dict:
+    try:
+        return json.loads(MODELS_CONFIG.read_text())
+    except (OSError, ValueError) as e:
+        log.warning("model config read failed: %s", e)
+        return {}
+
+
+# Which model is live is decided by the workflow (MODEL_ID env, set from the
+# /start argument); the registry only describes it. Falls back to the default
+# so running bot.py by hand still works.
+_REGISTRY = _load_registry()
+MODEL_ID = os.environ.get("MODEL_ID") or _REGISTRY.get("default", "")
+_MODEL = _REGISTRY.get("models", {}).get(MODEL_ID, {})
+MODEL_LABEL = _MODEL.get("label", MODEL_ID or "unknown")
+# Whitelist: a typo in models.json must not be able to overwrite `messages`/`stream`.
+_SAMPLING_KEYS = {"temperature", "top_p", "top_k", "min_p", "repeat_penalty"}
+SAMPLING = {k: v for k, v in _MODEL.get("sampling", {}).items() if k in _SAMPLING_KEYS}
+MAX_TOKENS = int(os.environ.get("LLAMA_MAX_TOKENS") or _MODEL.get("max_tokens", 800))
+# Rough history cap in characters: ~2 chars per token of the room left after the
+# reply. A heuristic (Burmese tokenises worse than English), but it stops long
+# coding replies from silently overflowing the context window.
+HISTORY_CHAR_BUDGET = max(2000, (int(_MODEL.get("ctx", 4096)) - MAX_TOKENS) * 2)
+CHUNK = 3800  # per Telegram message; comfortably under the 4096-char cap
 
 # Idle shutdown (ROADMAP Phase 6). IDLE_TIMEOUT_MINUTES=0 disables it. The
 # warning fires once, IDLE_WARN_MINUTES before the cutoff.
@@ -83,11 +109,22 @@ _idle = IdleTracker(IDLE_TIMEOUT_S, IDLE_WARN_S)
 _history: dict[int, list[dict[str, str]]] = {}
 
 
-def _trim_history(history: list[dict[str, str]], max_turns: int) -> None:
-    """Keep only the most recent `max_turns` user+assistant pairs, in place."""
-    keep = max(0, 2 * max_turns)
+def _trim_history(
+    history: list[dict[str, str]], max_turns: int, max_chars: int
+) -> None:
+    """Keep the most recent `max_turns` pairs and at most `max_chars`, in place.
+
+    Always drops whole user+assistant pairs from the front: Gemma-style chat
+    templates reject a conversation that starts with an assistant turn.
+    """
+    # Odd length means the newest message is an unanswered user turn (we trim
+    # right after appending it). Keep it on top of the N pairs, otherwise the
+    # cut lands mid-pair and the history starts with an assistant turn.
+    keep = max(0, 2 * max_turns) + len(history) % 2
     if len(history) > keep:
         del history[: len(history) - keep]
+    while len(history) > 2 and sum(len(m["content"]) for m in history) > max_chars:
+        del history[:2]
 
 
 def _owner_only(func):
@@ -115,9 +152,13 @@ def _owner_only(func):
 
 @_owner_only
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "Already running. Ask me anything, or use /stop, /reset, /model."
-    )
+    wanted = context.args[0].lower() if context.args else ""
+    if wanted and wanted != MODEL_ID:
+        # Switching means a fresh runner: the worker only sees /start while offline.
+        text = f"Running {MODEL_ID}, not {wanted}. To switch: /stop, then /start {wanted}."
+    else:
+        text = f"Already running {MODEL_LABEL}. Ask me anything, or use /stop, /reset, /model."
+    await update.message.reply_text(text)
 
 
 @_owner_only
@@ -135,43 +176,49 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 @_owner_only
 async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    try:
-        cfg = json.loads(MODELS_CONFIG.read_text())
-        current = cfg["models"][cfg["default"]]
-        lines = [f"Current: {cfg['default']} ({current['file']})"]
-        others = [m for m in cfg["models"] if m != cfg["default"]]
-        if others:
-            lines.append("Configured (not live-switchable yet): " + ", ".join(others))
-        await update.message.reply_text("\n".join(lines))
-    except (OSError, KeyError, ValueError) as e:
-        log.warning("model config read failed: %s", e)
+    models = _REGISTRY.get("models", {})
+    if not models:
         await update.message.reply_text("Could not read model config.")
+        return
+    others = [m for m in models if m != MODEL_ID]
+    lines = [f"Current: {MODEL_LABEL} [{MODEL_ID}]"]
+    if others:
+        lines.append("Others: " + ", ".join(others))
+        lines.append("Switch: /stop, then /start <id>")
+    await update.message.reply_text("\n".join(lines))
 
 
-def _shown(buf: str) -> str:
-    """Clamp to comfortably under Telegram's 4096-char message cap.
+async def _reply_retry(message, text: str):
+    """reply_text with one retry on Telegram flood control."""
+    try:
+        return await message.reply_text(text)
+    except RetryAfter as e:
+        await asyncio.sleep(e.retry_after)
+        return await message.reply_text(text)
 
-    Splitting into multiple messages instead would break streaming edits
-    (there'd be no single message left to keep editing), so truncate.
-    """
-    return buf if len(buf) <= 3900 else buf[:3900] + "\n\n[truncated]"
 
+async def _stream_reply(client: httpx.AsyncClient, sent, messages: list[dict], send_new) -> str:
+    """Stream a completion into Telegram via periodic edits. Returns the full text.
 
-async def _stream_reply(client: httpx.AsyncClient, sent, messages: list[dict]) -> str:
-    """Stream a completion into `sent` via periodic edits. Returns the full text.
+    Replies longer than CHUNK chars roll over: the current message is finalised
+    at a sensible break (see chunking.split_point) and streaming continues in a
+    fresh message, so long code answers arrive whole instead of truncated.
 
     Errors are rendered into the message itself (whatever streamed so far,
     plus a short error suffix) rather than raised, since by the time we know
     something went wrong the user already has a "..." placeholder on screen
-    that needs to become *something* final.
+    that needs to become *something* final. The suffix is never part of the
+    returned text, so it can't leak into the conversation history.
     """
     buf = ""
+    start = 0  # buf[start:] is what `sent` currently shows
     last_edit_time = 0.0
     last_edit_text = ""
 
     async def safe_edit(new_text: str) -> None:
         nonlocal last_edit_text
-        if new_text == last_edit_text or not new_text:
+        # Telegram rejects empty/whitespace-only text; a chunk can begin with "\n".
+        if new_text == last_edit_text or not new_text.strip():
             return
         try:
             await sent.edit_text(new_text)
@@ -186,6 +233,19 @@ async def _stream_reply(client: httpx.AsyncClient, sent, messages: list[dict]) -
                 raise
         last_edit_text = new_text
 
+    async def render(text: str, *, force: bool = False) -> None:
+        nonlocal sent, start, last_edit_text, last_edit_time
+        while len(text) - start > CHUNK:
+            cut = start + split_point(text[start:], CHUNK)
+            await safe_edit(text[start:cut])  # finalise this message
+            start = cut
+            sent = await send_new("...")
+            last_edit_text = "..."
+        now = time.monotonic()
+        if force or now - last_edit_time >= EDIT_INTERVAL:
+            await safe_edit(text[start:])
+            last_edit_time = now
+
     try:
         async for delta in stream_chat(
             client,
@@ -193,23 +253,20 @@ async def _stream_reply(client: httpx.AsyncClient, sent, messages: list[dict]) -
             api_key=LLAMA_API_KEY,
             messages=messages,
             max_tokens=MAX_TOKENS,
+            sampling=SAMPLING,
         ):
             buf += delta
-            now = time.monotonic()
-            if now - last_edit_time >= EDIT_INTERVAL:
-                await safe_edit(_shown(buf))
-                last_edit_time = now
+            await render(buf)
     except LlamaError as e:
         log.warning("llama error: %s", e)
-        await safe_edit(_shown(buf + f"\n\n[error: {e}]") if buf else f"Error: {e}")
+        await render(buf + f"\n\n[error: {e}]" if buf else f"Error: {e}", force=True)
         return buf
     except httpx.HTTPError as e:
         log.warning("http error talking to llama-server: %s", e)
-        suffix = "\n\n[connection error]"
-        await safe_edit(_shown(buf + suffix) if buf else "Connection error.")
+        await render(buf + "\n\n[connection error]" if buf else "Connection error.", force=True)
         return buf
 
-    await safe_edit(_shown(buf))  # land the final text even inside the throttle gap
+    await render(buf, force=True)  # land the final text even inside the throttle gap
     return buf
 
 
@@ -222,17 +279,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     history = _history.setdefault(chat_id, [])
     history.append({"role": "user", "content": text})
-    _trim_history(history, MAX_HISTORY_TURNS)
+    _trim_history(history, MAX_HISTORY_TURNS, HISTORY_CHAR_BUDGET)
     messages = [{"role": "system", "content": SYSTEM_PROMPT}, *history]
 
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
     sent = await update.message.reply_text("...")
     client: httpx.AsyncClient = context.bot_data["http_client"]
 
-    reply = await _stream_reply(client, sent, messages)
+    reply = await _stream_reply(
+        client, sent, messages, lambda t: _reply_retry(update.message, t)
+    )
 
-    history.append({"role": "assistant", "content": reply})
-    _trim_history(history, MAX_HISTORY_TURNS)
+    if reply:
+        history.append({"role": "assistant", "content": reply})
+        _trim_history(history, MAX_HISTORY_TURNS, HISTORY_CHAR_BUDGET)
+    else:
+        # Failed before any text: drop the unanswered user turn so roles keep
+        # alternating (strict chat templates reject two user turns in a row).
+        history.pop()
 
 
 async def _notify_owner(app: Application, text: str) -> None:
@@ -282,7 +346,7 @@ async def _post_init(app: Application) -> None:
     if IDLE_TIMEOUT_S > 0:
         # Keep a reference: the event loop only holds tasks weakly.
         app.bot_data["idle_task"] = asyncio.create_task(_idle_watchdog(app))
-    log.info("bot ready, owner chat=%s, model server=%s", ALLOWED_CHAT_ID, LLAMA_URL)
+    log.info("bot ready, model=%s, owner chat=%s, server=%s", MODEL_ID, ALLOWED_CHAT_ID, LLAMA_URL)
 
 
 async def _post_shutdown(app: Application) -> None:

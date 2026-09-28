@@ -2,6 +2,12 @@ name: host
 
 on:
   workflow_dispatch:
+    inputs:
+      model:
+        description: 'Model id from config/models.json (blank = default)'
+        required: false
+        default: ''
+        type: string
 
 concurrency:
   group: host
@@ -25,12 +31,29 @@ jobs:
       - name: Free disk space
         run: bash scripts/setup_runner.sh
 
-      - name: Read model config
+      # The requested id arrives via env (never interpolated into the script) and
+      # must be an existing key of config/models.json, so it can only ever be one
+      # of the known ids by the time later steps use it.
+      - name: Resolve model
         id: model
+        env:
+          REQ_MODEL: ${{ inputs.model }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_ALLOWED_CHAT_ID: ${{ secrets.TG_ALLOWED_CHAT_ID }}
         run: |
-          id=$(jq -er .default config/models.json)
-          echo "id=$id" >> "$GITHUB_OUTPUT"
-          echo "file=$(jq -er ".models[\"$id\"].file" config/models.json)" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          id="${REQ_MODEL:-$(jq -er .default config/models.json)}"
+          if ! jq -e --arg id "$id" '.models | has($id)' config/models.json >/dev/null; then
+            known=$(jq -r '.models | keys | join(", ")' config/models.json)
+            bash scripts/tg_notify.sh "Unknown model. Available: ${known}" || true
+            echo "::error::Unknown model id (see config/models.json)"
+            exit 1
+          fi
+          {
+            echo "id=$id"
+            echo "file=$(jq -er --arg id "$id" '.models[$id].file' config/models.json)"
+            echo "label=$(jq -er --arg id "$id" '.models[$id].label' config/models.json)"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Restore model cache
         id: cache
@@ -84,8 +107,9 @@ jobs:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_ALLOWED_CHAT_ID: ${{ secrets.TG_ALLOWED_CHAT_ID }}
           TPS: ${{ steps.smoke.outputs.tps }}
+          LABEL: ${{ steps.model.outputs.label }}
         run: |
-          bash scripts/tg_notify.sh "llama-server OK (Qwen2.5-7B Q4_K_M, ~${TPS} tok/s). Switching to chat mode - ask me anything. Commands: /stop /reset /model"
+          bash scripts/tg_notify.sh "llama-server OK (${LABEL}, ~${TPS} tok/s). Switching to chat mode - ask me anything. Commands: /stop /reset /model"
 
       - name: Set up Python
         uses: actions/setup-python@v7
@@ -104,6 +128,7 @@ jobs:
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_ALLOWED_CHAT_ID: ${{ secrets.TG_ALLOWED_CHAT_ID }}
+          MODEL_ID: ${{ steps.model.outputs.id }}
         run: python3 bot/bot.py
 
       # Runs on success, failure AND cancellation - see the comment in

@@ -2,11 +2,32 @@
   "default": "qwen2.5-7b",
   "models": {
     "qwen2.5-7b": {
+      "label": "Qwen2.5-7B Q4_K_M",
       "kind": "chat",
       "repo": "bartowski/Qwen2.5-7B-Instruct-GGUF",
       "file": "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
       "min_bytes": 4500000000,
       "ctx": 4096
+    },
+    "gemma4-12b": {
+      "label": "Gemma 4 12B QAT (coding + multilingual)",
+      "kind": "chat",
+      "repo": "unsloth/gemma-4-12B-it-qat-GGUF",
+      "file": "gemma-4-12B-it-qat-UD-Q4_K_XL.gguf",
+      "min_bytes": 6500000000,
+      "ctx": 8192,
+      "max_tokens": 1500,
+      "sampling": { "temperature": 1.0, "top_p": 0.95, "top_k": 64 }
+    },
+    "padauk": {
+      "label": "AI4Burmese Padauk Q8 (Burmese-first, Gemma 4)",
+      "kind": "chat",
+      "repo": "WYNN747/ai4burmese-padauk-gguf",
+      "file": "padauk-gemma-q8_0.gguf",
+      "min_bytes": 7500000000,
+      "ctx": 4096,
+      "max_tokens": 1000,
+      "sampling": { "temperature": 1.0, "top_p": 0.95, "top_k": 64 }
     }
   }
 }
