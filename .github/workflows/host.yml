@@ -125,7 +125,7 @@ jobs:
           bash scripts/restore_webhook.sh
 
       # Only fires when every prior required step succeeded, i.e. bot.py
-      # exited cleanly via /stop or (later, Phase 6) idle timeout - not
+      # exited cleanly via /stop or the idle timeout (bot/idle.py) - not
       # after a failure, which "Notify failure" below already reports.
       - name: Notify Telegram (offline)
         env:

@@ -17,6 +17,7 @@ It is gone the moment this process exits, which is the point.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -27,7 +28,7 @@ from pathlib import Path
 import httpx
 from telegram import BotCommand, Update
 from telegram.constants import ChatAction
-from telegram.error import BadRequest, RetryAfter
+from telegram.error import BadRequest, RetryAfter, TelegramError
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -36,6 +37,7 @@ from telegram.ext import (
     filters,
 )
 
+from idle import IdleAction, IdleTracker
 from llm import LlamaError, stream_chat
 
 logging.basicConfig(
@@ -69,6 +71,13 @@ SYSTEM_PROMPT = os.environ.get(
 )
 MODELS_CONFIG = Path(__file__).resolve().parent.parent / "config" / "models.json"
 
+# Idle shutdown (ROADMAP Phase 6). IDLE_TIMEOUT_MINUTES=0 disables it. The
+# warning fires once, IDLE_WARN_MINUTES before the cutoff.
+IDLE_TIMEOUT_S = int(float(os.environ.get("IDLE_TIMEOUT_MINUTES", "20")) * 60)
+IDLE_WARN_S = int(float(os.environ.get("IDLE_WARN_MINUTES", "5")) * 60)
+IDLE_CHECK_S = 30  # watchdog poll interval; worst-case overshoot of the timeout
+_idle = IdleTracker(IDLE_TIMEOUT_S, IDLE_WARN_S)
+
 # {chat_id: [{"role": ..., "content": ...}, ...]}  -- system prompt not stored here,
 # it's prepended fresh on every request so /reset can't accidentally drop it.
 _history: dict[int, list[dict[str, str]]] = {}
@@ -92,8 +101,14 @@ def _owner_only(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat = update.effective_chat
         if chat is None or chat.id != ALLOWED_CHAT_ID:
-            return
-        return await func(update, context)
+            return  # strangers must not be able to reset the idle clock
+        # Touch on both ends: a slow streamed reply (CPU, 3-6 tok/s) can run
+        # for minutes, and that time must not count as idle.
+        _idle.touch()
+        try:
+            return await func(update, context)
+        finally:
+            _idle.touch()
 
     return wrapper
 
@@ -220,13 +235,62 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     _trim_history(history, MAX_HISTORY_TURNS)
 
 
+async def _notify_owner(app: Application, text: str) -> None:
+    """Best-effort message to the owner. Never raises: a failed courtesy
+    message must not stop the watchdog from doing its actual job."""
+    try:
+        await app.bot.send_message(chat_id=ALLOWED_CHAT_ID, text=text)
+    except TelegramError as e:
+        log.warning("owner notify failed: %s", e)
+
+
+async def _idle_watchdog(app: Application) -> None:
+    """Stop the bot (and therefore end the job) after a quiet stretch.
+
+    stop_running() makes run_polling() return, so bot.py exits 0 and the
+    workflow's `if: always()` step restores the webhook -- same path as /stop.
+    """
+    warn_min = max(1, IDLE_WARN_S // 60)
+    timeout_min = max(1, IDLE_TIMEOUT_S // 60)
+    while True:
+        await asyncio.sleep(IDLE_CHECK_S)
+        try:
+            action = _idle.check()
+            if action is IdleAction.WARN:
+                await _notify_owner(
+                    app,
+                    f"Idle for a while. Shutting down in ~{warn_min} min "
+                    "unless you send a message.",
+                )
+            elif action is IdleAction.STOP:
+                log.info("idle timeout reached, stopping")
+                await _notify_owner(
+                    app,
+                    f"Idle for {timeout_min} min - shutting down. "
+                    "Send /start to boot me again.",
+                )
+                app.stop_running()
+                return
+        except Exception:  # noqa: BLE001 - a dead watchdog means no idle shutdown
+            log.exception("idle watchdog iteration failed; continuing")
+
+
 async def _post_init(app: Application) -> None:
     app.bot_data["http_client"] = httpx.AsyncClient(timeout=120)
     await app.bot.set_my_commands(COMMANDS)
+    _idle.touch()  # the countdown starts when the bot is actually ready
+    if IDLE_TIMEOUT_S > 0:
+        # Keep a reference: the event loop only holds tasks weakly.
+        app.bot_data["idle_task"] = asyncio.create_task(_idle_watchdog(app))
     log.info("bot ready, owner chat=%s, model server=%s", ALLOWED_CHAT_ID, LLAMA_URL)
 
 
 async def _post_shutdown(app: Application) -> None:
+    task: asyncio.Task | None = app.bot_data.get("idle_task")
+    if task is not None:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
     client: httpx.AsyncClient | None = app.bot_data.get("http_client")
     if client is not None:
         await client.aclose()

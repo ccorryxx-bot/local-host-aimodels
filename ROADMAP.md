@@ -80,7 +80,7 @@ Deploy path: push to `worker/**` -> `deploy-worker.yml` -> `wrangler deploy` (so
 - **Exit:** image in about 1-2 minutes
 
 ### Phase 6: Lifecycle and hardening
-- [ ] Idle shutdown after 20 min without messages
+- [x] Idle shutdown after 20 min without messages — `bot/idle.py` (pure, unit-tested) + watchdog task in `bot.py`; owner-only activity resets the clock, one warning 5 min before; `IDLE_TIMEOUT_MINUTES` / `IDLE_WARN_MINUTES` env, `0` disables
 - [ ] Graceful `/stop`: stop bot, restore webhook, end job
 - [ ] RAM/disk watchdog, Telegram alert on failure
 - **Exit:** `/stop`, idle timeout and the 6 h limit all leave the webhook restored
