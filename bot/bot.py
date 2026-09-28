@@ -25,7 +25,7 @@ import time
 from pathlib import Path
 
 import httpx
-from telegram import Update
+from telegram import BotCommand, Update
 from telegram.constants import ChatAction
 from telegram.error import BadRequest, RetryAfter
 from telegram.ext import (
@@ -43,6 +43,16 @@ logging.basicConfig(
 )
 logging.getLogger("httpx").setLevel(logging.WARNING)  # one line per request is enough
 log = logging.getLogger("bot")
+
+# Registered with Telegram on every boot (see _post_init) so the "/" menu
+# always matches what's actually implemented below -- one list to keep in
+# sync, not two (this one, plus a copy pasted into a BotFather chat).
+COMMANDS = [
+    BotCommand("start", "Check the bot is up"),
+    BotCommand("stop", "Stop the runner and go offline"),
+    BotCommand("reset", "Clear conversation history"),
+    BotCommand("model", "Show the current model"),
+]
 
 BOT_TOKEN = os.environ["TG_BOT_TOKEN"]
 ALLOWED_CHAT_ID = int(os.environ["TG_ALLOWED_CHAT_ID"])
@@ -212,6 +222,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def _post_init(app: Application) -> None:
     app.bot_data["http_client"] = httpx.AsyncClient(timeout=120)
+    await app.bot.set_my_commands(COMMANDS)
     log.info("bot ready, owner chat=%s, model server=%s", ALLOWED_CHAT_ID, LLAMA_URL)
 
 
