@@ -44,15 +44,16 @@ local-host-aimodels/
 
 ### Phase 1: Repo + secrets
 - [x] Public repo created
-- [ ] Actions secrets added
-- [ ] Worker secrets added
-- **Exit:** all 5 secrets in place
+- [x] Actions secrets: `TG_BOT_TOKEN`, `TG_ALLOWED_CHAT_ID`, `TG_WEBHOOK_SECRET`
+- [ ] Remaining secrets: `GH_DISPATCH_PAT`, `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` (Worker secrets are pushed from Actions secrets on deploy)
+- **Exit:** all 6 secrets in place
 
 ### Phase 2: Cloudflare Worker (trigger)
-- [ ] Webhook handler with secret-token check
-- [ ] Reject any chat ID except the owner
-- [ ] `/start` dispatches the workflow, `/status` reports run state
-- [ ] Cron self-heal for webhook
+Deploy path: push to `worker/**` -> `deploy-worker.yml` -> `wrangler deploy` (source of truth stays in this repo).
+- [x] Webhook handler with secret-token check
+- [x] Reject any chat ID except the owner
+- [x] `/start` dispatches the workflow, `/status` reports run state
+- [x] Cron self-heal for webhook
 - **Exit:** `/start` in Telegram launches a workflow run
 
 ### Phase 3: Workflow and runner prep

@@ -1,0 +1,12 @@
+name = "local-host-aimodels"
+main = "index.js"
+compatibility_date = "2025-09-01"
+workers_dev = true
+
+[vars]
+GH_REPO = "ccorryxx-bot/local-host-aimodels"
+GH_WORKFLOW = "host.yml"
+GH_REF = "main"
+
+[triggers]
+crons = ["*/5 * * * *"]

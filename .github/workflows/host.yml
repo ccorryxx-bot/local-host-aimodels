@@ -1,0 +1,25 @@
+name: host
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: host
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  host:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - name: Placeholder (Phase 3 pending)
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_ALLOWED_CHAT_ID: ${{ secrets.TG_ALLOWED_CHAT_ID }}
+        run: |
+          curl -fsS -o /dev/null "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TG_ALLOWED_CHAT_ID}" \
+            --data-urlencode "text=Dispatch OK. Runner reached. Model hosting not built yet (Phase 3)."

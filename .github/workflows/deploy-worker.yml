@@ -1,0 +1,73 @@
+name: deploy-worker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'worker/**'
+      - '.github/workflows/deploy-worker.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-worker
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+      TG_WEBHOOK_SECRET: ${{ secrets.TG_WEBHOOK_SECRET }}
+      TG_ALLOWED_CHAT_ID: ${{ secrets.TG_ALLOWED_CHAT_ID }}
+      GH_DISPATCH_PAT: ${{ secrets.GH_DISPATCH_PAT }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check required secrets
+        id: creds
+        run: |
+          missing=""
+          for n in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID TG_BOT_TOKEN TG_WEBHOOK_SECRET TG_ALLOWED_CHAT_ID GH_DISPATCH_PAT; do
+            [ -z "${!n}" ] && missing="$missing $n"
+          done
+          if [ -n "$missing" ]; then
+            echo "::warning::Deploy skipped. Missing secrets:$missing"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve workers.dev URL
+        if: steps.creds.outputs.ready == 'true'
+        run: |
+          set -euo pipefail
+          SUB=$(curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain" | jq -r '.result.subdomain')
+          [ -n "$SUB" ] && [ "$SUB" != "null" ]
+          echo "::add-mask::$SUB"
+          echo "WORKER_URL=https://local-host-aimodels.${SUB}.workers.dev" >> "$GITHUB_ENV"
+
+      - name: Deploy worker
+        if: steps.creds.outputs.ready == 'true'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: worker
+          command: deploy --var WORKER_URL:${{ env.WORKER_URL }}
+          secrets: |
+            TG_BOT_TOKEN
+            TG_WEBHOOK_SECRET
+            TG_ALLOWED_CHAT_ID
+            GH_DISPATCH_PAT
+
+      - name: Heal webhook
+        if: steps.creds.outputs.ready == 'true'
+        run: |
+          curl -fsS -X POST "$WORKER_URL/heal" \
+            -H "X-Telegram-Bot-Api-Secret-Token: $TG_WEBHOOK_SECRET" > /dev/null
