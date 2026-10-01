@@ -51,10 +51,11 @@ log = logging.getLogger("bot")
 # always matches what's actually implemented below -- one list to keep in
 # sync, not two (this one, plus a copy pasted into a BotFather chat).
 COMMANDS = [
-    BotCommand("start", "Check the bot is up"),
+    BotCommand("start", "Start runner (optional model id)"),
     BotCommand("stop", "Stop the runner and go offline"),
     BotCommand("reset", "Clear conversation history"),
-    BotCommand("model", "Show the current model"),
+    BotCommand("model", "Show current and available models"),
+    BotCommand("status", "Show runner and model status"),
 ]
 
 BOT_TOKEN = os.environ["TG_BOT_TOKEN"]
@@ -186,6 +187,12 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         lines.append("Others: " + ", ".join(others))
         lines.append("Switch: /stop, then /start <id>")
     await update.message.reply_text("\n".join(lines))
+
+
+@_owner_only
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Report the active model; the Worker owns status checks while offline."""
+    await update.message.reply_text(f"Online. Running {MODEL_LABEL} [{MODEL_ID}].")
 
 
 async def _reply_retry(message, text: str):
@@ -372,6 +379,7 @@ def main() -> None:
     app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(CommandHandler("model", cmd_model))
+    app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # drop_pending_updates=False: anything Telegram queued while the webhook
