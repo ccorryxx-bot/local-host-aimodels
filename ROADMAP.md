@@ -106,6 +106,8 @@ Deploy path: push to `worker/**` -> `deploy-worker.yml` -> `wrangler deploy` (so
 | Chat model | Qwen2.5-7B-Instruct Q4_K_M (default) | Fast fallback, weak Burmese |
 | Coding + multilingual | Gemma 4 12B QAT (`gemma4-12b`) | LiveCodeBench v6 72%, Apache 2.0, 6.7 GB. **Burmese quality unverified: test first**, then consider making it the default |
 | Burmese-first | AI4Burmese Padauk Q8 (`padauk`) | Gemma 4 fine-tune, community model, 8 GB, unproven |
+| General fallback | Dolphin 3.0 Llama 3.1 8B Abliterated Q4_K_M (`dolphin3-8b-abliterated`) | ~5.0 GB; lower resource use and broad chat/coding fallback |
+| Quality fallback | Qwen3 14B Abliterated Q4_K_M (`qwen3-14b-abliterated`) | ~9.1 GB; stronger quality fallback, slower and memory-intensive on CPU |
 | Bot language | Python | Fast to build, mature Telegram libraries |
 | Webhook handling | Swap + Worker self-heal | Simplest for v1 |
 
@@ -115,7 +117,7 @@ Deploy path: push to `worker/**` -> `deploy-worker.yml` -> `wrangler deploy` (so
 
 ## Known limits
 
-- Repo cache limit is 10 GB, so the three models (about 19 GB) cannot all stay cached; least-recently-used ones get evicted and re-download (+3-6 min).
+- Repo cache limit is 10 GB, so the five models (about 33 GB) cannot all stay cached; least-recently-used ones get evicted and re-download (+3-6 min). The abliteration fallbacks are downloaded on demand via `/start <model-id>`.
 - `gemma4-12b` / `padauk` speeds are estimates until benchmarked (Phase 7). `padauk` and Gemma 4 GGUF loading via `-m` (text only, no mmproj) is untested on the runner.
 
 - CPU-only runner: roughly 3-6 tokens/sec on a 7B Q4 model.

@@ -28,6 +28,26 @@
       "ctx": 4096,
       "max_tokens": 1000,
       "sampling": { "temperature": 1.0, "top_p": 0.95, "top_k": 64 }
+    },
+    "dolphin3-8b-abliterated": {
+      "label": "Dolphin 3.0 Llama 3.1 8B Abliterated Q4_K_M (fallback)",
+      "kind": "chat",
+      "repo": "mradermacher/Dolphin3.0-Llama3.1-8B-abliterated-GGUF",
+      "file": "Dolphin3.0-Llama3.1-8B-abliterated.Q4_K_M.gguf",
+      "min_bytes": 4700000000,
+      "ctx": 8192,
+      "max_tokens": 1200,
+      "sampling": { "temperature": 0.7, "top_p": 0.9 }
+    },
+    "qwen3-14b-abliterated": {
+      "label": "Qwen3 14B Abliterated Q4_K_M (quality fallback)",
+      "kind": "chat",
+      "repo": "mradermacher/Qwen3-14B-abliterated-GGUF",
+      "file": "Qwen3-14B-abliterated.Q4_K_M.gguf",
+      "min_bytes": 8600000000,
+      "ctx": 8192,
+      "max_tokens": 1500,
+      "sampling": { "temperature": 0.7, "top_p": 0.8, "top_k": 20 }
     }
   }
 }
