@@ -141,6 +141,33 @@ class StreamRolloverTests(unittest.TestCase):
         self.assertEqual(sent.text, "```python\nprint(1)\n```")  # plain, nothing lost
 
 
+class StaleButtonTests(unittest.TestCase):
+    class _Query:
+        def __init__(self) -> None:
+            self.answers: list[tuple[str, bool]] = []
+
+        async def answer(self, text: str = "", show_alert: bool = False) -> None:
+            self.answers.append((text, show_alert))
+
+    class _Update:
+        def __init__(self, chat_id: int, query) -> None:
+            self.effective_chat = type("Chat", (), {"id": chat_id})()
+            self.callback_query = query
+
+    def test_owner_gets_alert_telling_next_step(self) -> None:
+        q = self._Query()
+        asyncio.run(bot.on_stale_button(self._Update(42, q), None))
+        (text, alert), = q.answers
+        self.assertTrue(alert)
+        self.assertIn("/stop first", text)
+        self.assertIn(bot.MODEL_ID, text)
+
+    def test_stranger_gets_nothing(self) -> None:
+        q = self._Query()
+        asyncio.run(bot.on_stale_button(self._Update(999, q), None))
+        self.assertEqual(q.answers, [])
+
+
 class ModelConfigTests(unittest.TestCase):
     def test_gemma_settings_applied(self) -> None:
         self.assertEqual(bot.MODEL_ID, "gemma4-12b")

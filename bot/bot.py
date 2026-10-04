@@ -31,6 +31,7 @@ from telegram.constants import ChatAction, ParseMode
 from telegram.error import BadRequest, RetryAfter, TelegramError
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -53,7 +54,7 @@ log = logging.getLogger("bot")
 # always matches what's actually implemented below -- one list to keep in
 # sync, not two (this one, plus a copy pasted into a BotFather chat).
 COMMANDS = [
-    BotCommand("start", "Start runner (optional model id)"),
+    BotCommand("start", "Select a model and start the runner"),
     BotCommand("stop", "Stop the runner and go offline"),
     BotCommand("reset", "Clear conversation history"),
     BotCommand("model", "Show current and available models"),
@@ -162,6 +163,18 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     else:
         text = f"Already running {MODEL_LABEL}. Ask me anything, or use /stop, /reset, /model."
     await update.message.reply_text(text)
+
+
+@_owner_only
+async def on_stale_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """A model-picker button tapped after the runner is already up.
+
+    The picker lives in the worker (offline side); once this bot is polling,
+    old buttons would otherwise spin forever. Answer them with the next step.
+    """
+    await update.callback_query.answer(
+        f"Already running {MODEL_ID}. /stop first to switch.", show_alert=True
+    )
 
 
 @_owner_only
@@ -412,11 +425,12 @@ def main() -> None:
     app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(CommandHandler("model", cmd_model))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CallbackQueryHandler(on_stale_button, pattern=r"^start:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # drop_pending_updates=False: anything Telegram queued while the webhook
     # couldn't be reached (there shouldn't be much) is still worth answering.
-    app.run_polling(drop_pending_updates=False, allowed_updates=["message"])
+    app.run_polling(drop_pending_updates=False, allowed_updates=["message", "callback_query"])
 
 
 if __name__ == "__main__":

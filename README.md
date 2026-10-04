@@ -6,7 +6,7 @@ Status: in progress (Phases 1-4 done). See [ROADMAP.md](ROADMAP.md).
 
 ## Chat models
 
-The workflow downloads the selected GGUF model on demand from Hugging Face. Start a session from Telegram with `/start <model-id>`; `/model` lists the available IDs.
+The workflow downloads the selected GGUF model on demand from Hugging Face. Start a session from Telegram with `/start`, which shows a model picker (buttons built from `config/models.json`); `/start <model-id>` skips the picker. `/model` lists the available IDs.
 
 | Model ID | Use case | Approx. download |
 |---|---|---:|

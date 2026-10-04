@@ -20,7 +20,7 @@ set -euo pipefail
 res=$(curl -fsS "https://api.telegram.org/bot${TG_BOT_TOKEN}/setWebhook" \
   --data-urlencode "url=${WORKER_URL}/tg" \
   --data-urlencode "secret_token=${TG_WEBHOOK_SECRET}" \
-  --data-urlencode 'allowed_updates=["message"]' \
+  --data-urlencode 'allowed_updates=["message","callback_query"]' \
   --data-urlencode "max_connections=1")
 
 ok=$(jq -r '.ok' <<<"$res")
