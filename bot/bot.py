@@ -39,7 +39,8 @@ from telegram.ext import (
 
 from chunking import split_point
 from idle import IdleAction, IdleTracker
-from llm import LlamaError, stream_chat
+from diag import llama_log_errors, meminfo_summary
+from llm import LlamaError, health, stream_chat
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -269,8 +270,26 @@ async def _stream_reply(client: httpx.AsyncClient, sent, messages: list[dict], s
         await render(buf + f"\n\n[error: {e}]" if buf else f"Error: {e}", force=True)
         return buf
     except httpx.HTTPError as e:
-        log.warning("http error talking to llama-server: %s", e)
-        await render(buf + "\n\n[connection error]" if buf else "Connection error.", force=True)
+        # str(e) is empty for most httpx errors (ReadTimeout, ...), so name the
+        # type, and check whether llama-server is still up: "timeout, alive"
+        # (slow/stalled) and "closed, down" (crashed) need different fixes.
+        kind = type(e).__name__
+        try:
+            alive = await health(client, base_url=LLAMA_URL)
+        except Exception:  # diagnostics must never mask the original error
+            alive = False
+        state = "alive" if alive else "down"
+        log.warning(
+            "http error talking to llama-server: %s (%s) | server %s | %s",
+            kind, str(e) or "no message", state, meminfo_summary(),
+        )
+        for line in llama_log_errors():
+            log.warning("llama-server log: %s", line)
+        tag = f"{kind}, server {state}"
+        await render(
+            buf + f"\n\n[connection error: {tag}]" if buf else f"Connection error: {tag}.",
+            force=True,
+        )
         return buf
 
     await render(buf, force=True)  # land the final text even inside the throttle gap

@@ -9,6 +9,8 @@ import asyncio
 import os
 import unittest
 
+import httpx
+
 # bot.py reads its config from env at import time.
 os.environ.update(
     TG_BOT_TOKEN="123:dummy",
@@ -91,6 +93,18 @@ class StreamRolloverTests(unittest.TestCase):
         reply, made = asyncio.run(_run([], fail=LlamaError("boom")))
         self.assertEqual(reply, "")
         self.assertEqual(made[0].text, "Error: boom")
+
+    def test_connection_error_names_type_and_keeps_partial_text(self) -> None:
+        # client is None in these tests, so the health probe itself fails and
+        # must be reported as "down" rather than masking the original error.
+        reply, made = asyncio.run(_run(["partial"], fail=httpx.ReadTimeout("")))
+        self.assertEqual(reply, "partial")
+        self.assertIn("[connection error: ReadTimeout, server down]", made[-1].text)
+
+    def test_connection_error_before_any_text(self) -> None:
+        reply, made = asyncio.run(_run([], fail=httpx.RemoteProtocolError("closed")))
+        self.assertEqual(reply, "")
+        self.assertEqual(made[0].text, "Connection error: RemoteProtocolError, server down.")
 
 
 class ModelConfigTests(unittest.TestCase):
