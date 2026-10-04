@@ -48,6 +48,26 @@
       "ctx": 8192,
       "max_tokens": 1500,
       "sampling": { "temperature": 0.7, "top_p": 0.8, "top_k": 20 }
+    },
+    "gemma4-12b-abl": {
+      "label": "Gemma 4 12B QAT Abliterated (huihui-ai)",
+      "kind": "chat",
+      "repo": "huihui-ai/Huihui-gemma-4-12B-it-qat-q4_0-unquantized-abliterated-GGUF",
+      "file": "Huihui-gemma-4-12B-it-qat-q4_0-unquantized-abliterated-Q4_K.gguf",
+      "min_bytes": 7000000000,
+      "ctx": 8192,
+      "max_tokens": 1500,
+      "sampling": { "temperature": 1.0, "top_p": 0.95, "top_k": 64 }
+    },
+    "gemma4-e4b-abl": {
+      "label": "Gemma 4 E4B QAT Abliterated (huihui-ai, fast)",
+      "kind": "chat",
+      "repo": "huihui-ai/Huihui-gemma-4-E4B-it-qat-q4_0-unquantized-abliterated-GGUF",
+      "file": "Huihui-gemma-4-E4B-it-qat-q4_0-unquantized-abliterated-Q4_K.gguf",
+      "min_bytes": 5000000000,
+      "ctx": 8192,
+      "max_tokens": 1200,
+      "sampling": { "temperature": 1.0, "top_p": 0.95, "top_k": 64 }
     }
   }
 }
