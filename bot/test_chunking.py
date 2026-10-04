@@ -35,6 +35,25 @@ class SplitPointTests(unittest.TestCase):
         self.assertEqual(cut, 9)
         self.assertNotEqual(text[cut], "\u103c")
 
+    def test_prefers_burmese_sentence_end_over_space(self) -> None:
+        # No newline; a space sits earlier in the window than the Burmese full
+        # stop (U+104B). The cut must land right after the full stop.
+        text = "က" * 72 + " " + "က" * 10 + "\u104b" + "က" * 50
+        self.assertEqual(split_point(text, 100), 84)
+
+    def test_latin_sentence_end_beats_earlier_space(self) -> None:
+        text = "a" * 75 + " " + "b" * 8 + ". " + "c" * 50
+        self.assertEqual(split_point(text, 100), 86)
+
+    def test_never_cuts_right_after_virama(self) -> None:
+        # base(8) + virama(9) + stacked consonant(10): the cut at index 10 would
+        # strand the stacked consonant. It must back up before the base letter
+        # so the whole stack travels together into the next message.
+        text = "က" * 9 + "\u1039" + "က" + "က" * 20
+        cut = split_point(text, 10)
+        self.assertEqual(cut, 8)
+        self.assertEqual(text[cut : cut + 3], "က\u1039က")
+
     def test_chunks_reassemble_losslessly(self) -> None:
         text = ("line of code\n" * 300) + ("မြန်မာစာ " * 200)
         parts, rest = [], text
