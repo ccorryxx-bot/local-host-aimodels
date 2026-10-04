@@ -68,6 +68,36 @@
       "ctx": 8192,
       "max_tokens": 1200,
       "sampling": { "temperature": 1.0, "top_p": 0.95, "top_k": 64 }
+    },
+    "gemma4-12b-coder-abl": {
+      "label": "Gemma 4 12B Coder (abliterated, Q4)",
+      "kind": "chat",
+      "repo": "mradermacher/Huihui-gemma-4-12B-coder-fable5-composer2.5-v1-abliterated-i1-GGUF",
+      "file": "Huihui-gemma-4-12B-coder-fable5-composer2.5-v1-abliterated.i1-Q4_K_M.gguf",
+      "min_bytes": 7000000000,
+      "ctx": 8192,
+      "max_tokens": 1500,
+      "sampling": { "temperature": 1.0, "top_p": 0.95, "top_k": 64 }
+    },
+    "qwen3-coder-30b-abl": {
+      "label": "Qwen3-Coder 30B-A3B (abliterated, IQ3_XS, experimental)",
+      "kind": "chat",
+      "repo": "mradermacher/Huihui-Qwen3-Coder-30B-A3B-Instruct-abliterated-i1-GGUF",
+      "file": "Huihui-Qwen3-Coder-30B-A3B-Instruct-abliterated.i1-IQ3_XS.gguf",
+      "min_bytes": 12000000000,
+      "ctx": 4096,
+      "max_tokens": 1000,
+      "sampling": { "temperature": 0.7, "top_p": 0.8, "top_k": 20, "repeat_penalty": 1.05 }
+    },
+    "qwen25-coder-14b-abl": {
+      "label": "Qwen2.5-Coder 14B (abliterated, Q4)",
+      "kind": "chat",
+      "repo": "bartowski/Qwen2.5-Coder-14B-Instruct-abliterated-GGUF",
+      "file": "Qwen2.5-Coder-14B-Instruct-abliterated-Q4_K_M.gguf",
+      "min_bytes": 8500000000,
+      "ctx": 8192,
+      "max_tokens": 1200,
+      "sampling": { "temperature": 0.7, "top_p": 0.8, "top_k": 20, "repeat_penalty": 1.05 }
     }
   }
 }
