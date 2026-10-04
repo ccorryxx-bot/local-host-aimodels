@@ -29,15 +29,20 @@ bot.EDIT_INTERVAL = 0  # no throttle in tests
 class FakeMessage:
     """Records edits; rejects what Telegram would reject."""
 
-    def __init__(self, text: str = "...") -> None:
+    def __init__(self, text: str = "...", reject_html: bool = False) -> None:
         self.text = text
         self.edits: list[str] = []
+        self.reject_html = reject_html
 
-    async def edit_text(self, text: str) -> None:
+    async def edit_text(self, text: str, parse_mode: str | None = None) -> None:
         if not text.strip():
             raise AssertionError("Telegram would reject empty text")
         if len(text) > 4096:
             raise AssertionError(f"message too long: {len(text)}")
+        if self.reject_html and parse_mode:
+            from telegram.error import BadRequest
+
+            raise BadRequest("Can't parse entities: unsupported start tag")
         self.text = text
         self.edits.append(text)
 
@@ -105,6 +110,35 @@ class StreamRolloverTests(unittest.TestCase):
         reply, made = asyncio.run(_run([], fail=httpx.RemoteProtocolError("closed")))
         self.assertEqual(reply, "")
         self.assertEqual(made[0].text, "Connection error: RemoteProtocolError, server down.")
+
+    def test_code_block_is_sent_as_pre_with_html_parse_mode(self) -> None:
+        reply, made = asyncio.run(_run(["Try:\n```py", "thon\nprint(1)\n```\n", "Done."]))
+        self.assertEqual(reply, "Try:\n```python\nprint(1)\n```\nDone.")  # history stays raw
+        self.assertIn('<pre><code class="language-python">print(1)</code></pre>', made[0].text)
+
+    def test_code_block_split_across_messages_reopens_in_next(self) -> None:
+        code = "".join(f"x{i} = {i}\n" for i in range(900))  # > CHUNK, one block
+        reply, made = asyncio.run(_run(["```python\n", code, "```\nEnd."]))
+        self.assertGreater(len(made), 1)
+        for m in made[:-1]:
+            self.assertIn("<pre>", m.text)
+            self.assertIn("</pre>", m.text)
+        self.assertIn("<pre>", made[-1].text)  # the continuation is still monospace
+        self.assertTrue(made[-1].text.rstrip().endswith("End."))
+
+    def test_falls_back_to_plain_text_if_telegram_rejects_html(self) -> None:
+        async def go():
+            sent = FakeMessage(reject_html=True)
+
+            async def send_new(text: str) -> FakeMessage:
+                return FakeMessage(text, reject_html=True)
+
+            bot.stream_chat = _fake_stream(["```python\nprint(1)\n```"])
+            return await bot._stream_reply(None, sent, [], send_new), sent
+
+        reply, sent = asyncio.run(go())
+        self.assertEqual(reply, "```python\nprint(1)\n```")
+        self.assertEqual(sent.text, "```python\nprint(1)\n```")  # plain, nothing lost
 
 
 class ModelConfigTests(unittest.TestCase):

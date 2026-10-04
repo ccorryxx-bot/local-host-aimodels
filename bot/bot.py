@@ -27,7 +27,7 @@ from pathlib import Path
 
 import httpx
 from telegram import BotCommand, Update
-from telegram.constants import ChatAction
+from telegram.constants import ChatAction, ParseMode
 from telegram.error import BadRequest, RetryAfter, TelegramError
 from telegram.ext import (
     Application,
@@ -41,6 +41,7 @@ from chunking import split_point
 from idle import IdleAction, IdleTracker
 from diag import llama_log_errors, meminfo_summary
 from llm import LlamaError, health, stream_chat
+from tgformat import to_telegram_html
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -220,32 +221,44 @@ async def _stream_reply(client: httpx.AsyncClient, sent, messages: list[dict], s
     """
     buf = ""
     start = 0  # buf[start:] is what `sent` currently shows
+    carry: str | None = None  # code-fence state at the start of `sent` (see tgformat)
     last_edit_time = 0.0
     last_edit_text = ""
 
-    async def safe_edit(new_text: str) -> None:
+    async def safe_edit(raw: str) -> None:
+        """Edit `sent` to show `raw` (model Markdown) with code in monospace."""
         nonlocal last_edit_text
-        # Telegram rejects empty/whitespace-only text; a chunk can begin with "\n".
-        if new_text == last_edit_text or not new_text.strip():
+        body, _ = to_telegram_html(raw, carry)
+        # Telegram rejects empty/whitespace-only text; a chunk can begin with "\n",
+        # and an opened-but-still-empty code block renders to nothing.
+        if body == last_edit_text or not body.strip():
             return
         try:
-            await sent.edit_text(new_text)
+            await sent.edit_text(body, parse_mode=ParseMode.HTML)
         except RetryAfter as e:
             # asyncio.sleep, not time.sleep: this coroutine shares an event
             # loop with the bot's own getUpdates polling, and a blocking
             # sleep here would stall that too.
             await asyncio.sleep(e.retry_after)
-            await sent.edit_text(new_text)
+            await sent.edit_text(body, parse_mode=ParseMode.HTML)
         except BadRequest as e:
-            if "message is not modified" not in str(e).lower():
+            msg = str(e).lower()
+            if "can't parse entities" in msg:
+                # Formatting must never cost the user the answer: show it plain.
+                log.warning("html parse rejected, sending plain text: %s", e)
+                await sent.edit_text(raw)
+            elif "message is not modified" not in msg:
                 raise
-        last_edit_text = new_text
+        last_edit_text = body
 
     async def render(text: str, *, force: bool = False) -> None:
-        nonlocal sent, start, last_edit_text, last_edit_time
+        nonlocal sent, start, carry, last_edit_text, last_edit_time
         while len(text) - start > CHUNK:
             cut = start + split_point(text[start:], CHUNK)
             await safe_edit(text[start:cut])  # finalise this message
+            # If the cut landed inside a code block, the next message must
+            # reopen it, or the rest of the code would show as plain prose.
+            _, carry = to_telegram_html(text[start:cut], carry)
             start = cut
             sent = await send_new("...")
             last_edit_text = "..."
