@@ -68,7 +68,8 @@ Deploy path: push to `worker/**` -> `deploy-worker.yml` -> `wrangler deploy` (so
 - [x] Owner-only allowlist — silent drop for any other chat ID, no reply (nothing for a prober to see)
 - [x] History kept in memory only, never written to disk — plain dict, gone when the process exits
 - [x] Commands: `/stop`, `/model`, `/reset` (`/stop` calls `Application.stop_running()`, exits the job cleanly)
-- [x] Streamed replies via message edit — throttled to one edit / 0.8s, final edit always lands
+- [x] Streamed replies via message edit — one edit / 1.2s by default (`EDIT_INTERVAL_SECONDS`), final edit always lands
+- [x] Telegram flood control (429): `bot/pacing.py` honours `retry_after` without blocking the model stream, skips edits during the cooldown, then widens the edit interval (x2, cap 6s) for the rest of the session. Edits that must land (rollover, end of reply) wait the cooldown out. Intermediate edit errors never abort a reply.
 - [x] `if: always()` step restores webhook — direct `setWebhook`, not the worker's `/heal` (see restore_webhook.sh)
 - [x] Model select: `/start <id>` (worker -> `workflow_dispatch` input `model`); registry in `config/models.json`; `/model` lists ids; switching = `/stop`, then `/start <id>`
 - [x] Long replies roll over into extra messages (no more `[truncated]`); history capped by chars as well as turns

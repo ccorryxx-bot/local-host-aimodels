@@ -22,7 +22,7 @@ import json
 import logging
 import os
 import sys
-import time
+from datetime import timedelta
 from pathlib import Path
 
 import httpx
@@ -42,6 +42,7 @@ from chunking import split_point
 from idle import IdleAction, IdleTracker
 from diag import llama_log_errors, meminfo_summary
 from llm import LlamaError, health, stream_chat
+from pacing import EditPacer
 from tgformat import to_telegram_html
 
 logging.basicConfig(
@@ -69,7 +70,9 @@ LLAMA_URL = f"http://127.0.0.1:{LLAMA_PORT}"
 
 # Kept user+assistant pairs, not raw message count.
 MAX_HISTORY_TURNS = int(os.environ.get("MAX_HISTORY_TURNS", "12"))
-EDIT_INTERVAL = float(os.environ.get("EDIT_INTERVAL_SECONDS", "0.8"))
+# Base gap between streamed edits. Above Telegram's ~1 message/s per-chat guideline
+# on purpose; pacing.EditPacer widens it further if Telegram still answers 429.
+EDIT_INTERVAL = float(os.environ.get("EDIT_INTERVAL_SECONDS", "1.2"))
 SYSTEM_PROMPT = os.environ.get(
     "SYSTEM_PROMPT", "You are a helpful, concise assistant reachable over Telegram."
 )
@@ -210,17 +213,48 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_text(f"Online. Running {MODEL_LABEL} [{MODEL_ID}].")
 
 
-async def _reply_retry(message, text: str):
-    """reply_text with one retry on Telegram flood control."""
-    try:
-        return await message.reply_text(text)
-    except RetryAfter as e:
-        await asyncio.sleep(e.retry_after)
-        return await message.reply_text(text)
+def _retry_seconds(e: RetryAfter) -> float:
+    """`retry_after` in seconds. PTB 22.x gives an int; v23 will give a timedelta."""
+    ra = e.retry_after
+    return ra.total_seconds() if isinstance(ra, timedelta) else float(ra)
+
+
+# One pacer per process, so back-off learned from a 429 carries over to the next
+# reply instead of being rediscovered (and paid for) every time. Created lazily
+# so EDIT_INTERVAL is read at first use.
+_pacer: EditPacer | None = None
+
+
+def _get_pacer() -> EditPacer:
+    global _pacer
+    if _pacer is None:
+        _pacer = EditPacer(EDIT_INTERVAL)
+    return _pacer
+
+
+async def _reply_retry(message, text: str, attempts: int = 3):
+    """reply_text, waiting out Telegram flood control (a few tries, then raise)."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return await message.reply_text(text)
+        except RetryAfter as e:
+            if attempt == attempts:
+                raise
+            await asyncio.sleep(_retry_seconds(e))
+
+
+_LAND_ATTEMPTS = 4  # tries for an edit that must not be dropped
+_LAND_MAX_WAIT = 60.0  # longest single wait for flood control to clear
 
 
 async def _stream_reply(client: httpx.AsyncClient, sent, messages: list[dict], send_new) -> str:
     """Stream a completion into Telegram via periodic edits. Returns the full text.
+
+    Reading llama-server's stream never waits on Telegram: when Telegram answers
+    429 (flood control) the pacer records the cooldown, edits are skipped until
+    it ends, and the buffer keeps growing meanwhile. The next edit after the
+    cooldown shows everything generated so far. (Sleeping inside this loop used
+    to freeze the reply mid-sentence for `retry_after` seconds.)
 
     Replies longer than CHUNK chars roll over: the current message is finalised
     at a sensible break (see chunking.split_point) and streaming continues in a
@@ -232,53 +266,81 @@ async def _stream_reply(client: httpx.AsyncClient, sent, messages: list[dict], s
     that needs to become *something* final. The suffix is never part of the
     returned text, so it can't leak into the conversation history.
     """
+    pacer = _get_pacer()
     buf = ""
     start = 0  # buf[start:] is what `sent` currently shows
     carry: str | None = None  # code-fence state at the start of `sent` (see tgformat)
-    last_edit_time = 0.0
     last_edit_text = ""
 
-    async def safe_edit(raw: str) -> None:
-        """Edit `sent` to show `raw` (model Markdown) with code in monospace."""
+    async def safe_edit(raw: str) -> bool:
+        """Edit `sent` to show `raw` (model Markdown) with code in monospace.
+
+        True: the message shows `raw` (or there was nothing to change).
+        False: Telegram refused for now (flood control, network blip). Telegram
+        errors are never raised from here -- a failed intermediate edit must
+        not abort the generation; the next edit carries the whole buffer anyway.
+        Logs name only the error type / timings, never message text (public logs).
+        """
         nonlocal last_edit_text
         body, _ = to_telegram_html(raw, carry)
         # Telegram rejects empty/whitespace-only text; a chunk can begin with "\n",
         # and an opened-but-still-empty code block renders to nothing.
         if body == last_edit_text or not body.strip():
-            return
+            return True
         try:
-            await sent.edit_text(body, parse_mode=ParseMode.HTML)
+            try:
+                await sent.edit_text(body, parse_mode=ParseMode.HTML)
+            except BadRequest as e:
+                msg = str(e).lower()
+                if "can't parse entities" in msg:
+                    # Formatting must never cost the user the answer: show it plain.
+                    log.warning("html parse rejected, sending plain text: %s", e)
+                    await sent.edit_text(raw)
+                elif "message is not modified" not in msg:
+                    raise
         except RetryAfter as e:
-            # asyncio.sleep, not time.sleep: this coroutine shares an event
-            # loop with the bot's own getUpdates polling, and a blocking
-            # sleep here would stall that too.
-            await asyncio.sleep(e.retry_after)
-            await sent.edit_text(body, parse_mode=ParseMode.HTML)
-        except BadRequest as e:
-            msg = str(e).lower()
-            if "can't parse entities" in msg:
-                # Formatting must never cost the user the answer: show it plain.
-                log.warning("html parse rejected, sending plain text: %s", e)
-                await sent.edit_text(raw)
-            elif "message is not modified" not in msg:
-                raise
+            wait = _retry_seconds(e)
+            pacer.flood(wait)
+            log.warning(
+                "telegram flood control: edits paused %.0fs, edit interval now %.1fs",
+                wait, pacer.interval,
+            )
+            return False
+        except TelegramError as e:
+            log.warning("telegram edit failed (%s); will retry", type(e).__name__)
+            return False
         last_edit_text = body
+        return True
+
+    async def land(raw: str) -> None:
+        """Make `sent` show `raw`, waiting out flood control instead of dropping text.
+
+        Used where the text must arrive: finalising a rolled-over message and the
+        end of the reply. May block the reader, which is fine at those points.
+        """
+        for _ in range(_LAND_ATTEMPTS):
+            await asyncio.sleep(min(pacer.wait(), _LAND_MAX_WAIT))  # 0 when not flooded
+            if await safe_edit(raw):
+                return
+            if pacer.wait() == 0:  # failed for a reason other than flood control
+                await asyncio.sleep(0.5)
+        log.warning("gave up landing an edit after %d tries", _LAND_ATTEMPTS)
 
     async def render(text: str, *, force: bool = False) -> None:
-        nonlocal sent, start, carry, last_edit_text, last_edit_time
+        nonlocal sent, start, carry, last_edit_text
         while len(text) - start > CHUNK:
             cut = start + split_point(text[start:], CHUNK)
-            await safe_edit(text[start:cut])  # finalise this message
+            await land(text[start:cut])  # finalise this message
             # If the cut landed inside a code block, the next message must
             # reopen it, or the rest of the code would show as plain prose.
             _, carry = to_telegram_html(text[start:cut], carry)
             start = cut
             sent = await send_new("...")
             last_edit_text = "..."
-        now = time.monotonic()
-        if force or now - last_edit_time >= EDIT_INTERVAL:
-            await safe_edit(text[start:])
-            last_edit_time = now
+        if force:
+            await land(text[start:])
+        elif pacer.ready() and await safe_edit(text[start:]):
+            pacer.sent()
 
     try:
         async for delta in stream_chat(

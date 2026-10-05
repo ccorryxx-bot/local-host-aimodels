@@ -258,3 +258,94 @@ class CommandTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --- Telegram flood control (HTTP 429 / RetryAfter) -------------------------
+#
+# Field report: a streamed reply stops mid-sentence for 10-20 s, then the whole
+# text lands at once. Cause: editMessageText answered 429 and the handler slept
+# for `retry_after` INSIDE the loop that reads llama-server's stream, so the
+# reader stalled with it. Reading must never wait on Telegram.
+
+import time  # noqa: E402
+
+from telegram.error import NetworkError, RetryAfter  # noqa: E402
+
+
+class FlakyMessage(FakeMessage):
+    """FakeMessage whose n-th edit attempt raises the n-th planned error."""
+
+    def __init__(self, plan: list[Exception | None], text: str = "...") -> None:
+        super().__init__(text)
+        self.plan = list(plan)
+        self.attempts = 0
+        self.fail_times: list[float] = []
+
+    async def edit_text(self, text: str, parse_mode: str | None = None) -> None:
+        self.attempts += 1
+        err = self.plan.pop(0) if self.plan else None
+        if err is not None:
+            self.fail_times.append(time.monotonic())
+            raise err
+        await super().edit_text(text, parse_mode)
+
+
+async def _run_flaky(deltas, plan):
+    """Like _run, but the first message fails per `plan`; returns pull times too."""
+    pulls: list[float] = []
+
+    async def gen(*_a, **_kw):
+        for d in deltas:
+            pulls.append(time.monotonic())
+            yield d
+
+    sent = FlakyMessage(plan)
+    made = [sent]
+
+    async def send_new(text: str) -> FakeMessage:
+        m = FakeMessage(text)
+        made.append(m)
+        return m
+
+    bot.stream_chat = gen
+    reply = await bot._stream_reply(None, sent, [], send_new)
+    return reply, made, pulls
+
+
+class FloodControlTests(unittest.TestCase):
+    def setUp(self) -> None:
+        bot._pacer = None  # learned back-off must not leak between tests
+
+    def test_reader_is_not_blocked_while_telegram_says_wait(self) -> None:
+        reply, made, pulls = asyncio.run(
+            _run_flaky(["a", "b", "c"], [RetryAfter(1)])
+        )
+        self.assertEqual(reply, "abc")
+        # The 2nd delta must be pulled right after the flood, not retry_after later.
+        self.assertLess(pulls[1] - made[0].fail_times[0], 0.3)
+
+    def test_text_still_lands_after_flood(self) -> None:
+        reply, made, _ = asyncio.run(_run_flaky(["a", "b", "c"], [RetryAfter(1)]))
+        self.assertEqual(made[0].text, "abc")
+
+    def test_repeated_flood_does_not_kill_the_reply(self) -> None:
+        reply, made, _ = asyncio.run(
+            _run_flaky(["a", "b", "c"], [RetryAfter(1), RetryAfter(1)])
+        )
+        self.assertEqual(reply, "abc")
+        self.assertEqual(made[0].text, "abc")
+
+    def test_transient_network_error_does_not_abort_generation(self) -> None:
+        reply, made, _ = asyncio.run(
+            _run_flaky(["a", "b", "c"], [NetworkError("boom")])
+        )
+        self.assertEqual(reply, "abc")
+        self.assertEqual(made[0].text, "abc")
+
+    def test_rollover_survives_flood_on_finalising_edit(self) -> None:
+        deltas = ["a" * 2000, "b" * 2000, "c" * 2000]  # 6000 chars > CHUNK
+        reply, made, _ = asyncio.run(_run_flaky(deltas, [None, RetryAfter(1)]))
+        self.assertEqual(reply, "".join(deltas))
+        shown = "".join(m.text for m in made if m.text != "...")
+        for ch in "abc":
+            self.assertEqual(shown.count(ch), 2000, f"lost '{ch}' text across messages")
