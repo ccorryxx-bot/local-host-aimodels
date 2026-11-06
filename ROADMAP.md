@@ -84,6 +84,7 @@ Deploy path: push to `worker/**` -> `deploy-worker.yml` -> `wrangler deploy` (so
 
 ### Phase 6: Lifecycle and hardening
 - [x] Idle shutdown after 20 min without messages — `bot/idle.py` (pure, unit-tested) + watchdog task in `bot.py`; owner-only activity resets the clock, one warning 5 min before; `IDLE_TIMEOUT_MINUTES` / `IDLE_WARN_MINUTES` env, `0` disables
+- [x] Persona via Telegram — `/setup prompt <text|reset>` (`bot/persona.py`, `bot/ghsecrets.py`, unit-tested); applies live and is saved to the `BOT_SYSTEM_PROMPT` repo secret with a repo-scoped, Secrets-only PAT (`GH_SECRETS_PAT`)
 - [ ] Graceful `/stop`: stop bot, restore webhook, end job
 - [ ] RAM/disk watchdog, Telegram alert on failure
 - **Exit:** `/stop`, idle timeout and the 6 h limit all leave the webhook restored

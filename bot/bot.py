@@ -41,8 +41,10 @@ from telegram.ext import (
 from chunking import split_point
 from idle import IdleAction, IdleTracker
 from diag import llama_log_errors, meminfo_summary
+from ghsecrets import SecretsError, delete_secret, put_secret
 from llm import LlamaError, health, stream_chat
 from pacing import EditPacer
+from persona import MAX_PROMPT_CHARS, Kind, parse_setup
 from tgformat import to_telegram_html
 
 logging.basicConfig(
@@ -60,6 +62,7 @@ COMMANDS = [
     BotCommand("reset", "Clear conversation history"),
     BotCommand("model", "Show current and available models"),
     BotCommand("status", "Show runner and model status"),
+    BotCommand("setup", "Set the persona: /setup prompt <text>"),
 ]
 
 BOT_TOKEN = os.environ["TG_BOT_TOKEN"]
@@ -73,9 +76,15 @@ MAX_HISTORY_TURNS = int(os.environ.get("MAX_HISTORY_TURNS", "12"))
 # Base gap between streamed edits. Above Telegram's ~1 message/s per-chat guideline
 # on purpose; pacing.EditPacer widens it further if Telegram still answers 429.
 EDIT_INTERVAL = float(os.environ.get("EDIT_INTERVAL_SECONDS", "1.2"))
-SYSTEM_PROMPT = os.environ.get(
-    "SYSTEM_PROMPT", "You are a helpful, concise assistant reachable over Telegram."
-)
+DEFAULT_SYSTEM_PROMPT = "You are a helpful, concise assistant reachable over Telegram."
+# `or`, not a get() default: a repo secret that was never set reaches us as "".
+SYSTEM_PROMPT = os.environ.get("SYSTEM_PROMPT", "").strip() or DEFAULT_SYSTEM_PROMPT
+# /setup prompt mirrors the persona into this repo secret so it survives the
+# ephemeral runner (host.yml feeds it back in as SYSTEM_PROMPT on the next run).
+# The name is a constant on purpose: chat input must never pick which secret to write.
+PROMPT_SECRET_NAME = "BOT_SYSTEM_PROMPT"
+GH_SECRETS_PAT = os.environ.get("GH_SECRETS_PAT", "")  # fine-grained, Secrets: read+write
+GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "")  # "owner/repo", set by Actions
 MODELS_CONFIG = Path(__file__).resolve().parent.parent / "config" / "models.json"
 
 
@@ -114,6 +123,13 @@ _idle = IdleTracker(IDLE_TIMEOUT_S, IDLE_WARN_S)
 # {chat_id: [{"role": ..., "content": ...}, ...]}  -- system prompt not stored here,
 # it's prepended fresh on every request so /reset can't accidentally drop it.
 _history: dict[int, list[dict[str, str]]] = {}
+# Per-chat persona set with /setup prompt. Memory only, like the history; the
+# durable copy (if any) is the repo secret. No entry -> the startup SYSTEM_PROMPT.
+_system_prompts: dict[int, str] = {}
+
+
+def _active_prompt(chat_id: int) -> str:
+    return _system_prompts.get(chat_id, SYSTEM_PROMPT)
 
 
 def _trim_history(
@@ -205,6 +221,84 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         lines.append("Others: " + ", ".join(others))
         lines.append("Switch: /stop, then /start <id>")
     await update.message.reply_text("\n".join(lines))
+
+
+_SETUP_HELP = (
+    "Usage:\n"
+    "/setup prompt <text> - set the persona (multi-line is fine)\n"
+    "/setup prompt - show the current one\n"
+    "/setup prompt reset - back to the default\n"
+    f"Max {MAX_PROMPT_CHARS} characters."
+)
+
+
+async def _persist_prompt(client: httpx.AsyncClient, value: str | None) -> str | None:
+    """Mirror the prompt into the repo secret (None = delete it).
+
+    Returns None on success, else a short reason. Never raises and never
+    includes the token or the prompt text.
+    """
+    if not GH_SECRETS_PAT or not GITHUB_REPOSITORY:
+        return "GH_SECRETS_PAT is not configured"
+    try:
+        if value is None:
+            await delete_secret(
+                client, token=GH_SECRETS_PAT, repo=GITHUB_REPOSITORY, name=PROMPT_SECRET_NAME
+            )
+        else:
+            await put_secret(
+                client,
+                token=GH_SECRETS_PAT,
+                repo=GITHUB_REPOSITORY,
+                name=PROMPT_SECRET_NAME,
+                value=value,
+            )
+    except SecretsError as e:
+        return str(e)
+    return None
+
+
+@_owner_only
+async def cmd_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    cmd = parse_setup(update.message.text or "")
+    client: httpx.AsyncClient = context.bot_data["http_client"]
+
+    if cmd.kind is Kind.HELP:
+        await update.message.reply_text(_SETUP_HELP)
+    elif cmd.kind is Kind.SHOW:
+        prompt = _active_prompt(chat_id)
+        tag = "default" if prompt == DEFAULT_SYSTEM_PROMPT else "custom"
+        await update.message.reply_text(f"Current prompt ({tag}):\n\n{prompt}")
+    elif cmd.kind is Kind.TOO_LONG:
+        await update.message.reply_text(
+            f"Too long: {len(cmd.text)} chars, max {MAX_PROMPT_CHARS}. Nothing changed."
+        )
+    elif cmd.kind is Kind.SET:
+        # Apply first: the persona must work this session even if saving fails.
+        _system_prompts[chat_id] = cmd.text
+        _history.pop(chat_id, None)  # old turns were written under the old persona
+        log.info("system prompt set (%d chars)", len(cmd.text))  # length only, never content
+        err = await _persist_prompt(client, cmd.text)
+        tail = (
+            "Saved: future /start runs will use it too."
+            if err is None
+            else f"This session only, not saved ({err})."
+        )
+        await update.message.reply_text(
+            f"Prompt set ({len(cmd.text)} chars). History cleared so it applies cleanly.\n{tail}"
+        )
+    elif cmd.kind is Kind.RESET:
+        _system_prompts[chat_id] = DEFAULT_SYSTEM_PROMPT
+        _history.pop(chat_id, None)
+        log.info("system prompt reset")
+        err = await _persist_prompt(client, None)
+        tail = (
+            "Saved prompt removed: future runs use the default too."
+            if err is None
+            else f"The saved prompt was NOT removed ({err}); the next /start will load it again."
+        )
+        await update.message.reply_text(f"Prompt reset to default. History cleared.\n{tail}")
 
 
 @_owner_only
@@ -393,8 +487,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     history = _history.setdefault(chat_id, [])
     history.append({"role": "user", "content": text})
-    _trim_history(history, MAX_HISTORY_TURNS, HISTORY_CHAR_BUDGET)
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}, *history]
+    prompt = _active_prompt(chat_id)
+    # The prompt rides along on every request, so it eats into the context window too.
+    budget = max(2000, HISTORY_CHAR_BUDGET - len(prompt))
+    _trim_history(history, MAX_HISTORY_TURNS, budget)
+    messages = [{"role": "system", "content": prompt}, *history]
 
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
     sent = await update.message.reply_text("...")
@@ -406,7 +503,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if reply:
         history.append({"role": "assistant", "content": reply})
-        _trim_history(history, MAX_HISTORY_TURNS, HISTORY_CHAR_BUDGET)
+        _trim_history(history, MAX_HISTORY_TURNS, budget)
     else:
         # Failed before any text: drop the unanswered user turn so roles keep
         # alternating (strict chat templates reject two user turns in a row).
@@ -460,7 +557,12 @@ async def _post_init(app: Application) -> None:
     if IDLE_TIMEOUT_S > 0:
         # Keep a reference: the event loop only holds tasks weakly.
         app.bot_data["idle_task"] = asyncio.create_task(_idle_watchdog(app))
-    log.info("bot ready, model=%s, owner chat=%s, server=%s", MODEL_ID, ALLOWED_CHAT_ID, LLAMA_URL)
+    log.info(
+        "bot ready, model=%s, owner chat=%s, server=%s, prompt=%s, persist=%s",
+        MODEL_ID, ALLOWED_CHAT_ID, LLAMA_URL,
+        "custom" if SYSTEM_PROMPT != DEFAULT_SYSTEM_PROMPT else "default",
+        "on" if GH_SECRETS_PAT and GITHUB_REPOSITORY else "off",
+    )
 
 
 async def _post_shutdown(app: Application) -> None:
@@ -487,6 +589,7 @@ def main() -> None:
     app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(CommandHandler("model", cmd_model))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("setup", cmd_setup))
     app.add_handler(CallbackQueryHandler(on_stale_button, pattern=r"^start:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 

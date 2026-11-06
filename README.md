@@ -24,3 +24,18 @@ The workflow downloads the selected GGUF model on demand from Hugging Face. Star
 The abliterated entries are registered in `config/models.json` and use the Q4_K_M GGUF files from their Hugging Face repositories. Downloads are validated for the GGUF magic header and a minimum file size before llama-server starts.
 
 Because GitHub Actions cache storage is limited, models are cached per model and may be re-downloaded when cache entries are evicted.
+
+## Persona (`/setup prompt`)
+
+Give the model a character from Telegram while a session is running:
+
+| Command | Effect |
+|---|---|
+| `/setup prompt <text>` | Set the system prompt (multi-line is fine, max 1500 chars). Chat history is cleared so the new persona applies cleanly. |
+| `/setup prompt` | Show the current prompt. |
+| `/setup prompt reset` | Back to the built-in default (also deletes the saved copy). |
+
+The prompt applies immediately. To make it survive the next `/start`, the bot also saves it (libsodium-encrypted) into the repo secret `BOT_SYSTEM_PROMPT`, which `host.yml` feeds back in as `SYSTEM_PROMPT`. The repo is public, so the prompt is never committed or logged (the bot logs its length only).
+
+One-time setup for saving: create a **fine-grained PAT limited to this repository** with **Secrets: Read and write** (plus the mandatory Metadata: Read-only) and store it as the Actions secret `GH_SECRETS_PAT`. Without it `/setup` still works, for the current session only. `/setup` needs a running session: while the runner is offline, `/start` first.
+

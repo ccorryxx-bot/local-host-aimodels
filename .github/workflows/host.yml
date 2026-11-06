@@ -124,11 +124,19 @@ jobs:
       # directly until /stop is sent in chat, the 330 min timeout hits, or
       # /stop from the worker cancels the run (only reachable before the
       # webhook comes down or after it's restored - see restore_webhook.sh).
+      #
+      # SYSTEM_PROMPT is the persona saved by `/setup prompt` (an empty string
+      # when never set; bot.py then uses its built-in default). GH_SECRETS_PAT
+      # (fine-grained, this repo only, Secrets: read+write) lets the bot write
+      # that secret back. It is scoped to this step on purpose: llama-server
+      # and every other step never see it.
       - name: Run bot
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_ALLOWED_CHAT_ID: ${{ secrets.TG_ALLOWED_CHAT_ID }}
           MODEL_ID: ${{ steps.model.outputs.id }}
+          SYSTEM_PROMPT: ${{ secrets.BOT_SYSTEM_PROMPT }}
+          GH_SECRETS_PAT: ${{ secrets.GH_SECRETS_PAT }}
         run: python3 bot/bot.py
 
       # Runs on success, failure AND cancellation - see the comment in
